@@ -816,8 +816,9 @@ func main() {
 		fmt.Println("  Or simplest: run wifiler.exe directly on Windows instead of WSL.")
 		fmt.Println()
 	}
+	fmt.Printf("URL: %s\n", shareURL)
 	fmt.Printf("Session key: %s\n", secretKey)
-	fmt.Printf("(Only devices that scan the QR code below or are given this key can connect)\n\n")
+	fmt.Printf("(Only devices that scan the QR code below or are given this key or URL can connect)\n\n")
 	terminalQR, _ := qrcode.New(shareURL, qrcode.Medium)
 	fmt.Println(terminalQR.ToSmallString(false))
 
