@@ -80,9 +80,13 @@ wifiler uninstall
 
 - wifiler generates a new random session key every time it starts. The QR code encodes this key, so anyone who scans it (or is told the key) can connect — no key, no access.
 - Only the folder you launch wifiler from (and its subfolders) is ever shared. It can't reach parent folders, sibling folders, or other drives.
-- Everything is served over plain HTTP, so it's meant for trusted local networks (home Wi-Fi, etc.) — not public or untrusted ones.
+- Everything is served over plain HTTP, so it's meant for trusted local networks (home Wi-Fi, etc.) — not public or untrusted ones. On an open/public network, anyone sniffing traffic could capture the key.
+- Once a device has connected, there's no way to revoke just that device — stopping the server is the only way to cut off access for everyone.
+- Each connected device browses independently; one phone opening a subfolder doesn't affect what anyone else sees.
+- There's no limit on upload size or count beyond available disk space, so only share access with people you trust not to fill your disk.
+- The connection URL contains your session key, so avoid sharing screenshots of it or leaving it in places others can see (like browser history on a shared device).
 - Only one wifiler process can run on a machine at a time.
 
 ## License
 
-MIT
+[MIT](LICENSE)
