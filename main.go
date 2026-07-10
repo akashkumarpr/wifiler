@@ -552,10 +552,51 @@ func main() {
 		}
 	}
 
-	// Optional flags: --port <n> and --dir <path>. Anything unrecognized
-	// is ignored rather than failing the whole run.
-	requestedPort := "8080"
-	requestedDir := ""
+	// Parse flags
+	var requestedPort string = "8080"
+	var requestedDir string = ""
+
+	// Valid flags and their aliases
+	validFlags := map[string]bool{
+		"--port": true,
+		"--dir":  true,
+		// Note: -v is handled as a command above, not as a flag
+	}
+	
+	// Check for invalid arguments
+	for i := 1; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		
+		// Check if it's a flag (starts with - or --)
+		if strings.HasPrefix(arg, "-") {
+			// Handle single-letter flags like -x
+			if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && len(arg) > 1 {
+				// Check if it's a valid single-letter flag (we don't have any)
+				fmt.Printf("Error: Unknown flag '%s'\n\n", arg)
+				printHelp()
+				os.Exit(1)
+			}
+			
+			// Check if it's a valid long flag
+			if strings.HasPrefix(arg, "--") && !validFlags[arg] {
+				fmt.Printf("Error: Unknown flag '%s'\n\n", arg)
+				printHelp()
+				os.Exit(1)
+			}
+			
+			// Skip the value for flags that take arguments
+			if arg == "--port" || arg == "--dir" {
+				i++ // Skip the value
+			}
+		} else if !strings.HasPrefix(arg, "-") {
+			// Any non-flag, non-command argument is invalid
+			fmt.Printf("Error: Unknown argument '%s'\n\n", arg)
+			printHelp()
+			os.Exit(1)
+		}
+	}
+	
+	// Now parse flags safely
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -571,6 +612,7 @@ func main() {
 			}
 		}
 	}
+
 	if _, err := strconv.Atoi(requestedPort); err != nil {
 		fmt.Printf("Invalid --port value %q, must be a number.\n", requestedPort)
 		os.Exit(1)
