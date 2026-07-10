@@ -47,9 +47,14 @@ var (
 	broadcast    = make(chan string)
 	logMutex     sync.Mutex
 
-	targetDir string
-	baseDir   string // the directory wifiler was launched from; browsing can never go above this
-	dirMutex  sync.RWMutex
+	baseDir string // the directory wifiler was launched from; browsing can never go above this
+
+	// clientDirs tracks each device's own current browsing directory
+	// independently, keyed by a per-device client ID (separate from the
+	// shared secretKey used for auth). This lets multiple phones navigate
+	// into different folders without affecting each other.
+	clientDirs      = make(map[string]string)
+	clientDirsMutex sync.RWMutex
 
 	// secretKey is generated fresh every time the server starts. Anyone who
 	// wants access must have scanned the current QR code (or been told the
@@ -62,6 +67,7 @@ var (
 )
 
 const sessionCookieName = "wifiler_session"
+const clientIDCookieName = "wifiler_client"
 
 func writeLog(message string) {
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
@@ -83,17 +89,49 @@ func writeLog(message string) {
 }
 
 func getLocalIP() string {
+	// We don't actually send anything - UDP "Dial" just asks the OS to
+	// pick the local address it would use to route to this destination.
+	// That's reliably the real outbound-facing adapter (e.g. Wi-Fi),
+	// unlike enumerating all interfaces and guessing, which can't tell
+	// a real Wi-Fi adapter apart from a same-range virtual one (e.g.
+	// Windows Mobile Hotspot/ICS, which defaults to 192.168.137.x).
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return getLocalIPFallback()
+	}
+	defer conn.Close()
+
+	localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return getLocalIPFallback()
+	}
+	ip := localAddr.IP
+	if ip.IsLoopback() || strings.HasPrefix(ip.String(), "169.254") {
+		return getLocalIPFallback()
+	}
+	return ip.String()
+}
+
+// getLocalIPFallback is used only if the UDP-dial trick fails outright
+// (e.g. no route to the internet at all - fully offline LAN). It falls
+// back to scanning interfaces directly, skipping known-bad ranges like
+// Windows Mobile Hotspot's default 192.168.137.x.
+func getLocalIPFallback() string {
 	addrs, _ := net.InterfaceAddrs()
 	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				ipStr := ipnet.IP.String()
-				if len(ipStr) >= 7 && ipStr[:7] == "169.254" {
-					continue
-				}
-				return ipStr
-			}
+		ipnet, ok := addr.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() {
+			continue
 		}
+		ip4 := ipnet.IP.To4()
+		if ip4 == nil {
+			continue
+		}
+		ipStr := ip4.String()
+		if strings.HasPrefix(ipStr, "169.254") || strings.HasPrefix(ipStr, "192.168.137.") {
+			continue
+		}
+		return ipStr
 	}
 	return "127.0.0.1"
 }
@@ -131,6 +169,62 @@ func generateSessionKey() string {
 	return hex.EncodeToString(b)
 }
 
+// generateClientID creates a random per-device identifier so each browser/
+// phone can track its own current directory independently of everyone
+// else's, while still sharing the same secretKey for auth.
+func generateClientID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("c%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
+// getClientDir returns the given device's current browsing directory,
+// defaulting to baseDir if it hasn't navigated anywhere yet.
+func getClientDir(clientID string) string {
+	clientDirsMutex.RLock()
+	defer clientDirsMutex.RUnlock()
+	if dir, ok := clientDirs[clientID]; ok {
+		return dir
+	}
+	return baseDir
+}
+
+// setClientDir updates the given device's current browsing directory.
+func setClientDir(clientID, dir string) {
+	clientDirsMutex.Lock()
+	defer clientDirsMutex.Unlock()
+	clientDirs[clientID] = dir
+}
+
+// clientIDFromRequest reads the per-device cookie, if present.
+func clientIDFromRequest(r *http.Request) (string, bool) {
+	cookie, err := r.Cookie(clientIDCookieName)
+	if err != nil || cookie.Value == "" {
+		return "", false
+	}
+	return cookie.Value, true
+}
+
+// ensureClientID reads the per-device cookie, creating a fresh one (and a
+// baseDir entry in clientDirs) if this device hasn't been seen before.
+func ensureClientID(w http.ResponseWriter, r *http.Request) string {
+	if id, ok := clientIDFromRequest(r); ok {
+		return id
+	}
+	id := generateClientID()
+	http.SetCookie(w, &http.Cookie{
+		Name:     clientIDCookieName,
+		Value:    id,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	setClientDir(id, baseDir)
+	return id
+}
+
 // acquireSingleInstanceLock ensures only one wifiler process runs at a time
 // on this machine by trying to bind a fixed loopback-only port. If the bind
 // fails, another instance already holds it.
@@ -161,31 +255,44 @@ func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// watchDirectory polls every directory currently open by any connected
+// device (plus baseDir) and broadcasts a reload if any of their contents
+// change. Since each device can be browsing a different folder, we can no
+// longer track a single "current" path - we track all of them.
 func watchDirectory() {
-	var lastStateString string
+	lastState := make(map[string]string) // dir -> signature
+
 	for {
 		time.Sleep(1 * time.Second)
-		dirMutex.RLock()
-		currentPath := targetDir
-		dirMutex.RUnlock()
 
-		files, err := os.ReadDir(currentPath)
-		if err != nil {
-			continue
+		clientDirsMutex.RLock()
+		activeDirs := map[string]bool{baseDir: true}
+		for _, d := range clientDirs {
+			activeDirs[d] = true
 		}
+		clientDirsMutex.RUnlock()
 
-		var trackingSignature string
-		for _, f := range files {
-			if f.Name() != "wifiler_log.txt" && f.Name() != "wifiler.exe" && f.Name()[0] != '.' {
-				info, err := f.Info()
-				if err == nil {
-					trackingSignature += fmt.Sprintf("%s-%d-%t;", f.Name(), info.Size(), f.IsDir())
+		changed := false
+		for dir := range activeDirs {
+			files, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			var sig string
+			for _, f := range files {
+				if f.Name() != "wifiler_log.txt" && f.Name() != "wifiler.exe" && f.Name()[0] != '.' {
+					if info, err := f.Info(); err == nil {
+						sig += fmt.Sprintf("%s-%d-%t;", f.Name(), info.Size(), f.IsDir())
+					}
 				}
+			}
+			if lastState[dir] != sig {
+				lastState[dir] = sig
+				changed = true
 			}
 		}
 
-		if trackingSignature != lastStateString {
-			lastStateString = trackingSignature
+		if changed {
 			broadcast <- "reload"
 		}
 	}
@@ -486,15 +593,14 @@ func main() {
 			fmt.Printf("--dir %q is not a valid directory.\n", requestedDir)
 			os.Exit(1)
 		}
-		targetDir = abs
+		baseDir = abs
 	} else {
 		var err error
-		targetDir, err = os.Getwd()
+		baseDir, err = os.Getwd()
 		if err != nil {
 			log.Fatalf("Failed setup: %v", err)
 		}
 	}
-	baseDir = targetDir
 
 	localIP := getLocalIP()
 
@@ -520,6 +626,7 @@ func main() {
 
 	// Root page: authenticates the browser. If a valid ?key= is present,
 	// issue a session cookie; otherwise fall back to any existing cookie.
+	// Also ensures this device has its own independent client ID/directory.
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		keyParam := r.URL.Query().Get("key")
 		if keyParam != "" && keyParam == secretKey {
@@ -535,17 +642,21 @@ func main() {
 			w.Write([]byte("<h2>Access Denied</h2><p>Please scan the QR code shown on the host computer.</p>"))
 			return
 		}
+		ensureClientID(w, r)
 		w.Header().Set("Content-Type", "text/html")
 		w.Write(indexHTML)
 	})
 
 	http.HandleFunc("/ws", handleWebSocket)
 
-	// API: Directory Listing Endpoint
+	// API: Directory Listing Endpoint - scoped to the calling device's own
+	// current directory.
 	http.HandleFunc("/api/files", requireAuth(func(w http.ResponseWriter, r *http.Request) {
-		dirMutex.RLock()
-		currPath := targetDir
-		dirMutex.RUnlock()
+		clientID, ok := clientIDFromRequest(r)
+		if !ok {
+			clientID = ensureClientID(w, r)
+		}
+		currPath := getClientDir(clientID)
 
 		var items []FileItem
 		// "Root" is the directory wifiler was launched from - browsing can
@@ -569,7 +680,7 @@ func main() {
 		})
 	}))
 
-	// API: Step Inside a Subdirectory
+	// API: Step Inside a Subdirectory - only moves the calling device.
 	http.HandleFunc("/api/cd", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			return
@@ -583,49 +694,61 @@ func main() {
 			return
 		}
 
-		dirMutex.Lock()
-		candidate := filepath.Join(targetDir, targetFolder)
+		clientID, ok := clientIDFromRequest(r)
+		if !ok {
+			clientID = ensureClientID(w, r)
+		}
+		currPath := getClientDir(clientID)
+
+		candidate := filepath.Join(currPath, targetFolder)
 		// Belt-and-braces: the candidate must still be inside baseDir.
 		rel, relErr := filepath.Rel(baseDir, candidate)
 		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			dirMutex.Unlock()
 			http.Error(w, "invalid target", http.StatusBadRequest)
 			return
 		}
-		targetDir = candidate
-		writeLog(fmt.Sprintf("Moved into: %s", targetDir))
-		dirMutex.Unlock()
+		setClientDir(clientID, candidate)
+		writeLog(fmt.Sprintf("Client %s moved into: %s", clientID, candidate))
 
 		broadcast <- "reload"
 		w.Write([]byte(`{"success":true}`))
 	}))
 
-	// API: Jump Up a Directory (never above baseDir)
+	// API: Jump Up a Directory (never above baseDir) - only moves the
+	// calling device.
 	http.HandleFunc("/api/cd/up", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			return
 		}
 
-		dirMutex.Lock()
-		if targetDir != baseDir {
-			targetDir = filepath.Dir(targetDir)
+		clientID, ok := clientIDFromRequest(r)
+		if !ok {
+			clientID = ensureClientID(w, r)
 		}
-		writeLog(fmt.Sprintf("Moved up to: %s", targetDir))
-		dirMutex.Unlock()
+		currPath := getClientDir(clientID)
+
+		if currPath != baseDir {
+			currPath = filepath.Dir(currPath)
+			setClientDir(clientID, currPath)
+		}
+		writeLog(fmt.Sprintf("Client %s moved up to: %s", clientID, currPath))
 
 		broadcast <- "reload"
 		w.Write([]byte(`{"success":true}`))
 	}))
 
-	// API: Dynamic File Upload
+	// API: Dynamic File Upload - saves into the calling device's own
+	// current directory.
 	http.HandleFunc("/api/upload", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			return
 		}
 
-		dirMutex.RLock()
-		currPath := targetDir
-		dirMutex.RUnlock()
+		clientID, ok := clientIDFromRequest(r)
+		if !ok {
+			clientID = ensureClientID(w, r)
+		}
+		currPath := getClientDir(clientID)
 
 		r.ParseMultipartForm(32 << 20)
 		files := r.MultipartForm.File["files"]
@@ -655,11 +778,14 @@ func main() {
 		w.Write([]byte(`{"success":true}`))
 	}))
 
-	// Secure Static Downloading Router
+	// Secure Static Downloading Router - resolves against the calling
+	// device's own current directory.
 	http.HandleFunc("/files/", requireAuth(func(w http.ResponseWriter, r *http.Request) {
-		dirMutex.RLock()
-		currPath := targetDir
-		dirMutex.RUnlock()
+		clientID, ok := clientIDFromRequest(r)
+		if !ok {
+			clientID = ensureClientID(w, r)
+		}
+		currPath := getClientDir(clientID)
 
 		rawPath := r.URL.Path[len("/files/"):]
 		fullPath := filepath.Join(currPath, rawPath)
