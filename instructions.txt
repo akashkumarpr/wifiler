@@ -1,0 +1,22 @@
+## To init
+go mod init wifiler
+
+## Get packages
+go get github.com/skip2/go-qrcode
+
+## For Compilations
+
+# 1. Compilation for Windows systems
+$env:GOOS="windows"; $env:GOARCH="amd64"; go build -o dist/wifiler-windows.exe main.go
+
+# 2. Compilation for modern Apple Silicon M1/M2/M3 chips
+$env:GOOS="darwin"; $env:GOARCH="arm64"; go build -o dist/wifiler-mac-arm64 main.go
+
+# 3. Compilation for legacy Intel macOS environments
+$env:GOOS="darwin"; $env:GOARCH="amd64"; go build -o dist/wifiler-mac-intel main.go
+
+# 4. Compilation for Linux frameworks
+$env:GOOS="linux"; $env:GOARCH="amd64"; go build -o dist/wifiler-linux main.go
+
+# Reset to Windows developer variables state mapping defaults (if working on windows)
+$env:GOOS="windows"; $env:GOARCH="amd64"
