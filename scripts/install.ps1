@@ -15,4 +15,10 @@ $UserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
 if ($UserPath -notlike "*$InstallDir*") {
     [Environment]::SetEnvironmentVariable("PATH", "$UserPath;$InstallDir", "User")
 }
+
+# Update the CURRENT terminal session's PATH dynamically so they don't have to restart
+if ($env:Path -notlike "*$InstallDir*") {
+    $env:Path += ";$InstallDir"
+}
+
 Write-Host "[done] wifiler installed successfully! Restart your terminal and run 'wifiler'." -ForegroundColor Green
