@@ -21,4 +21,4 @@ if ($env:Path -notlike "*$InstallDir*") {
     $env:Path += ";$InstallDir"
 }
 
-Write-Host "[done] wifiler installed successfully! Restart your terminal and run 'wifiler'." -ForegroundColor Green
+Write-Host "[done] wifiler installed successfully! You can run 'wifiler' right away." -ForegroundColor Green
