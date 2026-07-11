@@ -70,6 +70,20 @@ If you run wifiler inside WSL (Windows Subsystem for Linux), the QR code will us
 
 If you're on an older version of Windows without mirrored networking support, the simplest option is to just run `wifiler.exe` directly on Windows instead of inside WSL.
 
+## Phone can't reach the QR code / URL?
+
+If your phone is on the same Wi-Fi but the page won't load — especially if you get an error like `ERR_ADDRESS_UNREACHABLE`, or it works on one Wi-Fi network but not another — the most common cause is **AP/client isolation**. This is a router setting (sometimes called "AP Isolation," "Client Isolation," or "Wireless Isolation") that lets every device reach the internet but blocks them from reaching each other directly. It's common on:
+
+- Public or shared Wi-Fi (cafes, offices, hostels, apartment-building routers)
+- Guest networks (even ones with a name that looks identical to your main network)
+- Some routers with it enabled by default, even at home
+
+**How to tell if this is the issue:** on the phone that can't connect, open a browser and try your router's admin page (usually `http://192.168.1.1` or similar). If that loads but wifiler's URL doesn't, isolation is almost certainly the cause — not wifiler.
+
+**If it's your own router:** log into its admin settings and look for an "AP Isolation" / "Client Isolation" toggle under the Wi-Fi settings, and turn it off. If you don't know the admin login, check the sticker on the router itself for the default credentials, or use your ISP's companion app if they have one.
+
+**If it's a network you don't control** (public Wi-Fi, someone else's router): isolation is usually intentional there for security, and there's no fix on wifiler's end — local peer-to-peer tools like this generally can't work on isolated networks. The workaround is to use a network you control instead, e.g. your phone's own mobile hotspot.
+
 ## Uninstall
 
 ```bash
